@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>小蓝 · 机器人遥控</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f1115; color: #e8e8e8;
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: #888; margin-bottom: 16px; }
+
+  .card {
+    background: #1a1d24; border-radius: 14px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; color: #888; margin: 0 0 10px; font-weight: 500; }
+
+  /* 表情 */
+  #face { display: block; margin: 0 auto; background: #000; border-radius: 10px; }
+
+  /* 状态 */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .stat { background: #22262e; border-radius: 10px; padding: 10px 6px; text-align: center; }
+  .stat .v { font-size: 20px; font-weight: 600; }
+  .stat .k { font-size: 11px; color: #888; margin-top: 2px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 6px; }
+  .dot.on { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+
+  /* 方向键 */
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 260px; margin: 0 auto; }
+  .btn {
+    background: #2a2f3a; border: none; border-radius: 12px;
+    color: #e8e8e8; font-size: 15px; padding: 20px 0;
+    transition: background .1s, transform .05s;
+    user-select: none; text-align: center;
+  }
+  .btn:active { background: #3d4657; transform: scale(.96); }
+  .btn.stop { background: #c0392b; }
+  .btn.stop:active { background: #e74c3c; }
+  .btn.empty { background: transparent; }
+
+  /* 速度 */
+  .row { display: flex; align-items: center; gap: 12px; }
+  input[type=range] { flex: 1; accent-color: #4a9eff; height: 28px; }
+  .spd { font-size: 15px; min-width: 44px; text-align: right; }
+
+  /* 对话 */
+  #log { max-height: 160px; overflow-y: auto; font-size: 13px; line-height: 1.7; }
+  #log div { margin-bottom: 6px; }
+  .me { color: #4a9eff; }
+  .ai { color: #7bd88f; }
+  .sys { color: #777; font-size: 12px; }
+
+  .input-row { display: flex; gap: 8px; margin-top: 12px; }
+  input[type=text] {
+    flex: 1; background: #22262e; border: none; border-radius: 10px;
+    padding: 12px 14px; color: #e8e8e8; font-size: 15px;
+  }
+  input[type=text]:focus { outline: 1px solid #4a9eff; }
+  .send {
+    background: #4a9eff; border: none; border-radius: 10px;
+    color: #fff; font-size: 15px; padding: 0 20px;
+  }
+
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .quick button {
+    background: #22262e; border: none; border-radius: 16px;
+    color: #aaa; font-size: 12px; padding: 7px 12px;
+  }
+  .quick button:active { background: #3d4657; }
+</style>
+</head>
+<body>
+
+<h1>小蓝 <span class="dot" id="conn"></span></h1>
+<div class="sub" id="status">连接中…</div>
+
+<div class="card">
+  <h2>表情</h2>
+  <canvas id="face" width="240" height="120"></canvas>
+</div>
+
+<div class="card">
+  <h2>状态</h2>
+  <div class="stats">
+    <div class="stat"><div class="v" id="s-dist">-</div><div class="k">距离 cm</div></div>
+    <div class="stat"><div class="v" id="s-pir">-</div><div class="k">人体</div></div>
+    <div class="stat"><div class="v" id="s-light">-</div><div class="k">光线</div></div>
+    <div class="stat"><div class="v" id="s-rssi">-</div><div class="k">信号</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>手动遥控</h2>
+  <div class="row" style="margin-bottom:12px">
+    <span style="font-size:12px;color:#888">速度</span>
+    <input type="range" id="speed" min="0" max="100" value="60">
+    <span class="spd" id="speedVal">60</span>
+  </div>
+  <div class="pad">
+    <div class="btn empty"></div>
+    <div class="btn" data-act="turn_left">↰ 左转</div>
+    <div class="btn empty"></div>
+    <div class="btn" data-act="move_back">↓ 后退</div>
+    <div class="btn stop" data-act="stop">■ 停</div>
+    <div class="btn" data-act="move_forward">↑ 前进</div>
+    <div class="btn empty"></div>
+    <div class="btn" data-act="turn_right">右转 ↱</div>
+    <div class="btn empty"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>对话</h2>
+  <div id="log"></div>
+  <div class="input-row">
+    <input type="text" id="text" placeholder="跟小蓝说点什么…" autocomplete="off">
+    <button class="send" id="send">发送</button>
+  </div>
+  <div class="quick">
+    <button>往前走</button>
+    <button>停下</button>
+    <button>你叫什么名字</button>
+    <button>转个圈</button>
+    <button>你开心吗</button>
+    <button>前面有什么</button>
+  </div>
+</div>
+
+<!-- ==================== 调试面板 ==================== -->
+<div class="card" id="debugCard">
+  <h2 style="cursor:pointer" onclick="toggleDebug()">
+    调试面板 <span id="dbgArrow" style="float:right">▼</span>
+  </h2>
+  <div id="debugBody" style="display:none">
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      方向校准（走 motor.h 完整逻辑）
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:12px 0;font-size:13px" onclick="serial('FWD')">前进</button>
+      <button class="btn" style="padding:12px 0;font-size:13px" onclick="serial('BACK')">后退</button>
+      <button class="btn" style="padding:12px 0;font-size:13px" onclick="serial('LEFT')">左转</button>
+      <button class="btn" style="padding:12px 0;font-size:13px" onclick="serial('RIGHT')">右转</button>
+    </div>
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      单轮测试（走 invert 修正）
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L+80')">左正80</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L-80')">左反80</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R+80')">右正80</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R-80')">右反80</button>
+    </div>
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      原始 GPIO（绕过一切修正，看物理方向）
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('RAW+')">物理正转</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('RAW-')">物理反转</button>
+    </div>
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      手动 PWM（-100 ~ 100，正数正转）
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <span style="font-size:12px;width:20px;color:#888">L</span>
+      <input type="range" id="rawL" min="-100" max="100" value="0">
+      <span class="spd" id="rawLv">0</span>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <span style="font-size:12px;width:20px;color:#888">R</span>
+      <input type="range" id="rawR" min="-100" max="100" value="0">
+      <span class="spd" id="rawRv">0</span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn" style="flex:1;padding:12px 0;font-size:13px" onclick="sendRaw()">执行 1.5 秒</button>
+      <button class="btn stop" style="flex:1;padding:12px 0;font-size:13px" onclick="serial('STOP')">急停</button>
+    </div>
+
+    <div style="margin-top:14px;font-size:12px;color:#888;margin-bottom:8px">
+      其它
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('STATUS')">状态</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('CHAT')">对话开关</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('AUTO')">自动避障</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let speed = 60;
+let emotion = 'idle';
+let connected = false;
+
+// ---------- 表情画布 ----------
+function drawFace(emo, blink) {
+  const c = $('face'), g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0,0,c.width,c.height);
+  g.fillStyle = '#fff'; g.strokeStyle = '#fff'; g.lineWidth = 4;
+
+  const lx = 78, rx = 162, ey = 48, rxr = 15, ryr = 19;
+  const mouthY = 92;
+
+  function circleEye(x,y,r,fill) {
+    g.beginPath();
+    if (fill) g.fill();
+    else g.stroke();
+    g.arc(x,y,r,0,Math.PI*2);
+    if (fill) g.fill(); else g.stroke();
+  }
+  function arcEye(x,y,r,up) {
+    g.beginPath();
+    if (up) g.arc(x, y+8, r, Math.PI*1.15, Math.PI*1.85);
+    else   g.arc(x, y-8, r, Math.PI*0.15, Math.PI*0.85);
+    g.stroke();
+  }
+  function lineEye(x,y,r) {
+    g.beginPath(); g.moveTo(x-r,y); g.lineTo(x+r,y); g.stroke();
+  }
+
+  let eyeType = 'circle', mouthType = 'smile';
+  switch(emo) {
+    case 'happy':     eyeType='arc'; mouthType='big'; break;
+    case 'sad':       eyeType='sad'; mouthType='frown'; break;
+    case 'surprised': eyeType='big'; mouthType='o'; break;
+    case 'thinking':  eyeType='half'; mouthType='small'; break;
+    case 'angry':     eyeType='circle'; mouthType='frown'; break;
+    case 'sleepy':    eyeType='line'; mouthType='small'; break;
+  }
+  if (blink && emo === 'idle') eyeType = 'line';
+
+  [lx, rx].forEach(x => {
+    if (eyeType === 'circle') { g.beginPath(); g.arc(x,ey,rxr,0,Math.PI*2); g.fill(); }
+    else if (eyeType === 'big') { g.beginPath(); g.arc(x,ey,rxr+4,0,Math.PI*2); g.fill(); }
+    else if (eyeType === 'arc') arcEye(x, ey, rxr, true);
+    else if (eyeType === 'sad') arcEye(x, ey, rxr, false);
+    else if (eyeType === 'line') lineEye(x, ey, rxr);
+    else if (eyeType === 'half') { g.beginPath(); g.ellipse(x,ey+4,rxr,ryr/2,0,0,Math.PI*2); g.fill(); }
+  });
+
+  g.beginPath();
+  if (mouthType === 'smile') g.arc(120, mouthY-10, 22, 0.15*Math.PI, 0.85*Math.PI);
+  else if (mouthType === 'big') g.arc(120, mouthY-14, 26, 0.1*Math.PI, 0.9*Math.PI);
+  else if (mouthType === 'frown') g.arc(120, mouthY+16, 20, 1.15*Math.PI, 1.85*Math.PI);
+  else if (mouthType === 'o') { g.beginPath(); g.ellipse(120, mouthY, 9, 12, 0, 0, Math.PI*2); g.fill(); }
+  else { g.beginPath(); g.arc(120, mouthY, 5, 0, Math.PI*2); g.fill(); }
+  g.stroke();
+}
+
+// 眨眼
+let nextBlink = 0;
+function tickFace() {
+  const now = Date.now();
+  if (!nextBlink) nextBlink = now + 2500 + Math.random()*3000;
+  const blinking = now < nextBlink + 150;
+  drawFace(emotion, blinking);
+  if (now > nextBlink + 150) nextBlink = 0;
+  requestAnimationFrame(tickFace);
+}
+tickFace();
+
+// ---------- MQTT 状态轮询 ----------
+async function poll() {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+    connected = d.connected;
+    $('conn').className = 'dot' + (connected ? ' on' : '');
+    $('status').textContent = connected ? '已连接' : '等待机器人…';
+    const s = d.state || {};
+    if (s.dist !== undefined) $('s-dist').textContent = s.dist;
+    if (s.pir !== undefined) $('s-pir').textContent = s.pir ? '有人' : '无';
+    if (s.light !== undefined) $('s-light').textContent = s.light ? '暗' : '亮';
+    if (s.rssi !== undefined) $('s-rssi').textContent = s.rssi;
+    if (s.emotion) emotion = s.emotion;
+    if (d.history && d.history.length) {
+      const last = d.history[d.history.length-1];
+      if (last.content && last.content !== lastMsg) {
+        lastMsg = last.content;
+        addLog(last.role === 'user' ? 'me' : 'ai', last.content);
+      }
+    }
+  } catch (e) {}
+}
+let lastMsg = '';
+setInterval(poll, 700);
+poll();
+
+// ---------- 遥控 ----------
+function cmd(action, ms) {
+  fetch('/api/cmd', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action, speed, duration_ms: ms||0})
+  });
+}
+document.querySelectorAll('.btn[data-act]').forEach(b => {
+  const act = b.dataset.act;
+  b.addEventListener('click', () => {
+    if (act === 'stop') cmd('stop', 0);
+    else if (act === 'move_forward') cmd('move_forward', 3000);
+    else if (act === 'move_back') cmd('move_back', 2000);
+    else if (act === 'turn_left') cmd('turn_left', 800);
+    else if (act === 'turn_right') cmd('turn_right', 800);
+  });
+});
+$('speed').addEventListener('input', e => {
+  speed = e.target.value;
+  $('speedVal').textContent = speed;
+});
+
+// ---------- 对话 ----------
+function addLog(cls, text) {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = (cls === 'me' ? '你：' : cls === 'ai' ? '小蓝：' : '') + text;
+  $('log').appendChild(d);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+async function send(text) {
+  if (!text.trim()) return;
+  addLog('me', text);
+  await fetch('/api/chat', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({text})
+  });
+}
+$('send').addEventListener('click', () => {
+  const t = $('text');
+  send(t.value);
+  t.value = '';
+});
+$('text').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const t = $('text');
+    send(t.value);
+    t.value = '';
+  }
+});
+document.querySelectorAll('.quick button').forEach(b => {
+  b.addEventListener('click', () => send(b.textContent));
+});
+
+// ---------- 调试面板 ----------
+function toggleDebug() {
+  const body = $('debugBody');
+  const arrow = $('dbgArrow');
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    arrow.textContent = '▲';
+  } else {
+    body.style.display = 'none';
+    arrow.textContent = '▼';
+  }
+}
+
+// 发串口命令（转发到固件的 handleSerialLine）
+async function serial(cmd) {
+  addLog('sys', '命令 ' + cmd);
+  try {
+    await fetch('/api/serial', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cmd})
+    });
+  } catch (e) {
+    addLog('sys', '发送失败');
+  }
+}
+
+// 原始 PWM 直接控制
+function sendRaw() {
+  const L = parseInt($('rawL').value);
+  const R = parseInt($('rawR').value);
+  addLog('sys', `原始电机 L=${L} R=${R}`);
+  fetch('/api/motor', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({L, R, ms: 1500})
+  });
+}
+
+// 两个滑块联动显示
+['rawL', 'rawR'].forEach((id, i) => {
+  const el = $(id);
+  const out = $(id + 'v');
+  el.addEventListener('input', e => {
+    out.textContent = e.target.value;
+  });
+});
+</script>
+</body>
+</html>
