@@ -1,6 +1,24 @@
 # ESP32-S3 AI 语音机器人
 
-一台能看、能听、能说、能跑的小车。ESP32-S3 做本体，PC 做大脑，通过 WiFi + MQTT 通信。
+<p align="center">
+  <img src="https://img.shields.io/badge/ESP32--S3-N16R8-blue?logo=espressif&logoColor=white" alt="ESP32-S3">
+  <img src="https://img.shields.io/badge/Framework-Arduino-00979D?logo=arduino&logoColor=white" alt="Arduino">
+  <img src="https://img.shields.io/badge/Build-PlatformIO-orange?logo=platformio&logoColor=white" alt="PlatformIO">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/MQTT-paho--2.x-660066?logo=mqtt&logoColor=white" alt="MQTT">
+  <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/ASR-Whisper-412991?logo=openai&logoColor=white" alt="Whisper">
+  <img src="https://img.shields.io/badge/LLM-DeepSeek-4D6BFE" alt="DeepSeek">
+  <img src="https://img.shields.io/badge/TTS-edge--tts-00A4EF?logo=microsoft&logoColor=white" alt="edge-tts">
+  <img src="https://img.shields.io/badge/I2S-INMP441%20%2B%20MAX98357-green" alt="I2S">
+  <img src="https://img.shields.io/badge/Motor-MX1508-red" alt="Motor">
+  <img src="https://img.shields.io/badge/Display-SSD1306-black" alt="Display">
+</p>
+
+> 一台能看、能听、能说、能跑的小车。ESP32-S3 做本体，PC 做大脑，通过 WiFi + MQTT 通信。
 
 ```
 ┌─────────────────────────┐                    ┌──────────────────────┐
@@ -16,6 +34,17 @@
                                                           │
                                                      手机网页遥控
 ```
+
+## 目录
+
+- [能力](#能力)
+- [硬件](#硬件)
+- [快速开始](#快速开始)
+- [串口命令](#串口命令)
+- [踩过的坑](#踩过的坑)
+- [项目结构](#项目结构)
+- [已知限制](#已知限制)
+
 
 ## 能力
 
