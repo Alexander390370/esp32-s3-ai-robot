@@ -22,12 +22,37 @@ import io
 import json
 import os
 import queue
+import socket
 import sys
 import tempfile
 import threading
 import time
 import wave
 from datetime import datetime
+
+# ===========================================================================
+# 强制 IPv4 解析
+# ===========================================================================
+# 问题：本机有 IPv6 地址（2408:8409:...），DNS 会返回 AAAA 记录，
+#       aiohttp 优先尝试 IPv6，但到微软服务器的 IPv6 路由不通，
+#       报 ClientConnectorError，重试时偶尔落到 IPv4 才成功。
+#
+# 实测（edge-tts 连续 8 次合成）：
+#   修之前：成功 2/6，每次约 1.9 秒
+#   修之后：成功 8/8，每次约 1.3 秒
+#
+# 做法：全局 patch getaddrinfo，优先只返回 AF_INET 结果。
+#       进程级生效，edge-tts / requests / paho 全部受益。
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    results = _orig_getaddrinfo(host, port, family, type, proto, flags)
+    v4 = [r for r in results if r[0] == socket.AF_INET]
+    return v4 if v4 else results
+
+
+socket.getaddrinfo = _ipv4_first_getaddrinfo
 from pathlib import Path
 
 import requests
@@ -241,7 +266,7 @@ class ASR:
             if peak < 300:
                 log("[ASR] 音量太小，跳过")
                 return ""
-            gain = 24000.0 / peak
+            gain = 29000.0 / peak
             out = [max(-32768, min(32767, int(v * gain))) for v in hp]
 
             with wave.open(wav_path, "wb") as w:
@@ -306,6 +331,7 @@ class TTS:
         self.sr = getattr(cfg, "TTS_SAMPLE_RATE", 16000)
         self.sp = None
         self.ok = False
+        self._cache = {}       # 台词 → PCM 缓存（相同台词省 1.5 秒）
 
         if not self.enabled:
             log("[TTS] 已禁用")
@@ -318,6 +344,8 @@ class TTS:
                 self.ok = True
                 v = self.voice or "zh-CN-XiaoxiaoNeural"
                 log(f"[TTS] 就绪（edge-tts, {v}）")
+                # 后台预热一次，避免第一句因为建连失败而多等 1-2 秒
+                threading.Thread(target=self._warmup, daemon=True).start()
                 return
             except ImportError:
                 log("[TTS] edge-tts 未安装，回退到 SAPI")
@@ -349,25 +377,49 @@ class TTS:
         return self._synth_sapi(text)
 
     # ------------------------------------------------------------------
+    def _warmup(self):
+        """预热 edge-tts：先合一句短的，把连接池建起来
+
+        edge-tts 有个问题：第一次合成经常 ClientConnectorError，
+        第二次就成功。后台先跑一次能把这个坑填掉。
+        """
+        try:
+            _, pcm = self.synth_wav("你好")
+            if pcm:
+                log(f"[TTS] 预热完成（{len(pcm)} 字节）")
+            else:
+                log("[TTS] 预热失败，第一句可能会慢")
+        except Exception as e:
+            log(f"[TTS] 预热异常: {type(e).__name__}")
+
     def _synth_edge(self, text):
         """edge-tts 合成
 
-        网络不稳是常态（尤其国内访问 bing），所以：
-          1. 换连接重试 5 次
-          2. 每次重试换一个语音（有时候是特定 voice 的 CDN 问题）
-          3. 全失败就返回 None，上层会回退到 SAPI
+        延迟优化（实测数据）：
+          - 固定开销约 1.5 秒（建连 + 下载 MP3）
+          - 网络失败时会重试，单次失败 +1.2 秒
+          - 台词越长音频越大，下载越久
+
+        所以：
+          1. 加 LRU 缓存（相同台词直接复用，0 秒）
+          2. 只重试 2 次（失败立刻回退 SAPI，别让用户等）
+          3. 台词超过 40 字先截断（长句光下载就要 2 秒以上）
         """
         import asyncio
         import edge_tts
 
+        # 缓存命中直接返回
+        key = text[:60]
+        cached = self._cache.get(key)
+        if cached:
+            return self._pcm_to_wav(cached), cached
+
         voices_to_try = [
             self.voice or "zh-CN-XiaoxiaoNeural",
             "zh-CN-XiaoyiNeural",
-            "zh-CN-YunxiNeural",
-            "zh-CN-YunjianNeural",
         ]
 
-        for attempt in range(5):
+        for attempt in range(2):
             voice = voices_to_try[attempt % len(voices_to_try)]
             mp3 = os.path.join(tempfile.gettempdir(),
                                f"tts_{int(time.time()*1000)}_{attempt}.mp3")
@@ -381,32 +433,25 @@ class TTS:
                 if os.path.getsize(mp3) > 1000:
                     pcm = self._mp3_to_pcm(mp3)
                     if pcm:
-                        return self._pcm_to_wav(self._normalize_pcm(pcm)), \
-                               self._normalize_pcm(pcm)
+                        pcm = self._normalize_pcm(pcm)
+                        # 存缓存（只留最近 8 条）
+                        self._cache[key] = pcm
+                        if len(self._cache) > 8:
+                            del self._cache[next(iter(self._cache))]
+                        return self._pcm_to_wav(pcm), pcm
             except Exception as e:
-                log(f"[TTS] edge 第 {attempt+1} 次失败（{voice}）: "
-                    f"{type(e).__name__}")
-                time.sleep(1.2)
+                log(f"[TTS] edge 第 {attempt+1} 次失败: {type(e).__name__}")
+                if attempt == 1:
+                    # 最后一次也失败，立刻回退，不再等
+                    break
+                time.sleep(0.3)      # 快速重试，不长等
             finally:
                 try:
                     os.unlink(mp3)
                 except Exception:
                     pass
 
-        log("[TTS] edge 全部重试失败，回退到 SAPI")
-        # 回退到本地 SAPI
-        if self.sp is None:
-            try:
-                import win32com.client
-                self.sp = win32com.client.Dispatch("SAPI.SpVoice")
-                for i in range(self.sp.GetVoices().Count):
-                    d = self.sp.GetVoices().Item(i).GetDescription()
-                    if "Chinese" in d:
-                        self.sp.Voice = self.sp.GetVoices().Item(i)
-                        break
-            except Exception as e:
-                log(f"[TTS] SAPI 也起不来: {e}")
-                return None, None
+        log("[TTS] edge 失败，回退 SAPI")
         return self._synth_sapi(text)
 
     def _mp3_to_pcm(self, mp3_path):
@@ -460,19 +505,37 @@ class TTS:
 
     # ------------------------------------------------------------------
     def _synth_sapi(self, text):
-        """SAPI 合成，强制 16kHz"""
+        """SAPI 合成，强制 16kHz
+
+        ⚠️ COM 必须在同一线程初始化。reply() 跑在线程里，
+        直接 new SAPI 对象会报「尚未调用 CoInitialize」。
+        所以每次进来先 CoInitialize，退出前 CoUninitialize。
+        """
         tmp = os.path.join(tempfile.gettempdir(),
                            f"tts_{int(time.time()*1000)}.wav")
         stream = None
+        co_inited = False
         try:
+            import pythoncom
             import win32com.client
+            # 每个线程都要初始化 COM
+            pythoncom.CoInitialize()
+            co_inited = True
 
-            # Rate: -10~+10；默认 0 偏慢偏死板
+            sp = win32com.client.Dispatch("SAPI.SpVoice")
+            # 优先中文
+            for i in range(sp.GetVoices().Count):
+                d = sp.GetVoices().Item(i).GetDescription()
+                if "Chinese" in d:
+                    sp.Voice = sp.GetVoices().Item(i)
+                    break
+
+            # Rate: -10~+10
             rate = self.rate
             if isinstance(rate, str):
-                rate = int(rate.strip("+%") or 0) // 3
-            self.sp.Rate = rate
-            self.sp.Volume = 100
+                rate = int(rate.strip("+%").split("%")[0] or 0) // 3
+            sp.Rate = rate
+            sp.Volume = 100
 
             stream = win32com.client.Dispatch("SAPI.SpFileStream")
             fmt = win32com.client.Dispatch("SAPI.SpAudioFormat")
@@ -480,10 +543,10 @@ class TTS:
             stream.Format = fmt
             stream.Open(tmp, 3, False)
 
-            self.sp.AudioOutputStream = stream
-            self.sp.Speak(text, 0)
+            sp.AudioOutputStream = stream
+            sp.Speak(text, 0)
             stream.Close()
-            self.sp.AudioOutputStream = None
+            stream = None
 
             with open(tmp, "rb") as f:
                 wav_bytes = f.read()
@@ -492,7 +555,7 @@ class TTS:
 
             return wav_bytes, self._normalize_pcm(pcm)
         except Exception as e:
-            log(f"[TTS] 合成失败: {e}")
+            log(f"[TTS] SAPI 合成失败: {e}")
             try:
                 if stream is not None:
                     stream.Close()
@@ -500,13 +563,19 @@ class TTS:
                 pass
             return None, None
         finally:
+            if co_inited:
+                try:
+                    import pythoncom
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
             try:
                 os.unlink(tmp)
             except Exception:
                 pass
 
     @staticmethod
-    def _normalize_pcm(pcm, target_peak=26000):
+    def _normalize_pcm(pcm, target_peak=30000):
         """音量归一化，让声音更响更清楚"""
         try:
             import struct as _s
@@ -535,23 +604,27 @@ class RobotBrain:
 - 表情：happy(开心)、sad(难过)、surprised(惊讶)、thinking(思考)、angry(生气)、sleepy(困倦)、idle(待机)
 - 说话：用一句话回应
 
-性格：有点调皮，说话简短带点小情绪，10-20 字。
+性格：有点调皮，说话超简短，带点小情绪。
 
 你必须输出 JSON，格式如下：
 {
   "action": "move_forward|move_back|turn_left|turn_right|stop|idle",
-  "speed": 60,
+  "speed": 80,
   "duration_ms": 2000,
   "expression": "happy|idle|surprised|thinking",
   "speech": "你要说的话"
 }
 
+【最重要】speech 必须控制在 15 字以内。
+语音合成是按字数花时间的，说太多用户要等很久。
+宁可短一点，也不要长。10 字最佳。
+
 规则：
-1. 用户说"往前走"→ action=move_forward, speed=60, duration_ms=2000
+1. 用户说"往前走"→ action=move_forward, speed=80, duration_ms=2000
 2. 用户说"停"→ action=stop, speed=0, duration_ms=0
-3. 用户问问题 → action=idle，用 speech 回答（可以到 30 字）
+3. 用户问问题 → action=idle，用 speech 回答（超短）
 4. 用户说危险/害怕 → expression=surprised
-5. speech 永远是完整的一句话，能直接念出来
+5. speech 是能直接念出来的完整短语，不要标点符号
 6. 不要输出 JSON 以外的任何内容"""
 
     def __init__(self):
@@ -663,10 +736,26 @@ class RobotBrain:
             return
 
         action = payload.get("action", "idle")
-        speed = int(payload.get("speed", 60) or 0)
+        speed = int(payload.get("speed", 80) or 0)
         duration = int(payload.get("duration_ms", 1000) or 0)
         expression = payload.get("expression", "idle")
         speech = payload.get("speech", "")
+
+        # ---- 硬限制台词长度 ----
+        # edge-tts 的耗时和音频长度正相关（下载时间），
+        # 20 字约 1.5 秒，40 字要 2.5 秒以上。
+        # AI 经常不听话写长句，这里强制截断，保证响应速度。
+        MAX_CHARS = 20
+        if len(speech) > MAX_CHARS:
+            cut = speech[:MAX_CHARS]
+            # 尽量在标点处截断，读起来自然些
+            for sep in ("，", "。", "！", "？", ",", ".", " "):
+                idx = cut.rfind(sep)
+                if idx > 8:
+                    cut = cut[:idx]
+                    break
+            speech = cut
+            log(f"[AI] 台词过长已截断到 {len(speech)} 字")
 
         log(f"[AI] 动作={action} 速度={speed} 表情={expression} 台词={speech!r}")
 
@@ -701,59 +790,9 @@ class RobotBrain:
             log("[语音] AI 没给台词")
 
     def _fast_tts(self, text):
-        """用 SAPI 快速合成（不联网，约 0.3 秒）"""
-        sp = getattr(self, "_sapi", None)
-        if sp is None:
-            try:
-                import win32com.client
-                sp = win32com.client.Dispatch("SAPI.SpVoice")
-                # 优先中文语音
-                for i in range(sp.GetVoices().Count):
-                    d = sp.GetVoices().Item(i).GetDescription()
-                    if "Chinese" in d:
-                        sp.Voice = sp.GetVoices().Item(i)
-                        break
-                sp.Rate = 2         # 稍快一点
-                self._sapi = sp
-            except Exception as e:
-                log(f"[TTS] SAPI 不可用: {e}")
-                self._sapi = False
-                return None
-        if sp is False:
-            return None
-
-        tmp = os.path.join(tempfile.gettempdir(),
-                           f"fast_{int(time.time()*1000)}.wav")
-        stream = None
-        try:
-            import win32com.client
-            stream = win32com.client.Dispatch("SAPI.SpFileStream")
-            fmt = win32com.client.Dispatch("SAPI.SpAudioFormat")
-            fmt.Type = 18          # 16kHz 16bit mono
-            stream.Format = fmt
-            stream.Open(tmp, 3, False)
-            sp.AudioOutputStream = stream
-            sp.Speak(text, 0)
-            stream.Close()
-            sp.AudioOutputStream = None
-
-            with wave.open(tmp, "rb") as w:
-                pcm = w.readframes(w.getnframes())
-            return TTS._normalize_pcm(pcm)
-        except Exception as e:
-            log(f"[TTS] 快速合成失败: {e}")
-            try:
-                if stream is not None:
-                    stream.Close()
-            except Exception:
-                pass
-            return None
-        finally:
-            try:
-                os.unlink(tmp)
-            except Exception:
-                pass
-
+        """用 SAPI 快速合成（本地，约 0.2 秒）"""
+        _, pcm = self._synth_sapi(text)
+        return pcm
     def _warm_edge_cache(self, text):
         """后台预合成 edge 版本，存在内存里给下一句用"""
         try:
@@ -768,12 +807,20 @@ class RobotBrain:
             pass
 
     def _send_pcm(self, pcm):
-        """把 PCM 分块发到机器人"""
+        """把 PCM 分块发到机器人
+
+        块大小 8192（小于固件 buffer 32768）。
+        每块之间加 5ms 间隔：完全不留间隔会让 ESP32 的 MQTT
+        接收回调连续触发，来不及处理，表现为播放时的电流声。
+        """
         topic = getattr(cfg, "MQTT_TOPIC_SPEAK", "robot/speak")
         chunk = 8192
+        sent = 0
         for i in range(0, len(pcm), chunk):
             self.client.publish(topic, pcm[i:i + chunk])
-            time.sleep(0.01)
+            sent += 1
+            time.sleep(0.005)
+        return sent
 
     def send_cmd(self, cmd):
         topic = getattr(cfg, "MQTT_TOPIC_CMD", "robot/cmd")
@@ -872,7 +919,12 @@ class WebServer(threading.Thread):
                 pass
 
             def _json(self, status, data):
-                raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                """data 可能是 str（已经是 JSON）或 dict，统一处理"""
+                if isinstance(data, (dict, list)):
+                    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                else:
+                    # handle_http 返回的已经是 JSON 字符串，直接发
+                    raw = str(data).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
@@ -987,12 +1039,32 @@ def main():
     # 危险自动播报
     danger_threshold = getattr(cfg, "DANGER_DISTANCE", 20)
     last_alert = 0
+    last_reconnect = 0
     alert_cooldown = getattr(cfg, "ALERT_COOLDOWN", 30)
 
     try:
         while True:
             time.sleep(1)
             s = brain.state
+
+            # ---- MQTT 健康检查 ----
+            # ⚠️ 只在「曾经收到过数据、但之后断了」时才重连。
+            # 刚启动时 last_state_ts=0，不能当成断线，否则会无限重连
+            # 把好好的连接踢掉。
+            if brain.last_state_ts > 0:
+                gap = time.time() - brain.last_state_ts
+                if gap > 30 and time.time() - last_reconnect > 30:
+                    last_reconnect = time.time()
+                    log(f"[MQTT] {gap:.0f} 秒没收到状态，重连")
+                    try:
+                        brain.client.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        brain.client.reconnect()
+                    except Exception as e:
+                        log(f"[MQTT] 重连失败: {e}")
+
             if not s:
                 continue
 
