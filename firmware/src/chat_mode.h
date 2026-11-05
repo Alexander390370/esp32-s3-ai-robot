@@ -166,15 +166,24 @@ class ChatMode {
       bool finished  = (m_silenceMs >= VAD_SILENCE_MS) &&
                        (m_speechMs >= VAD_MIN_SPEECH_MS);
 
-      if (tooLong || finished) {
-        // 太短的丢掉（咳嗽、关门声）
-        if (m_speechMs < VAD_MIN_SPEECH_MS) {
-          Serial.printf("[对话] 太短忽略 (说话 %dms)\n", m_speechMs);
+      // ---- 太短的宽容期 ----
+      // 说话 100ms 就掉到阈值以下，不代表说完了 —— 可能只是词间停顿，
+      // 或者声音一下变轻。这种情况如果直接丢弃，用户会觉得"说了没反应"。
+      // 做法：说话时长不够时，先不清空缓冲，给最多 1.5 秒宽容期，
+      //       期间再检测到声音就继续累积；超时才真的丢弃。
+      if (m_speechMs > 0 && m_speechMs < VAD_MIN_SPEECH_MS) {
+        if (m_silenceMs >= 1500) {
+          Serial.printf("[对话] 太短丢弃 (说话 %dms)\n", m_speechMs);
           m_state = LISTENING;
           m_buf.clear();
-          return;
+          m_speechMs = 0;
+          m_silenceMs = 0;
         }
+        // 否则继续攒着，等更多声音
+        return;
+      }
 
+      if (tooLong || finished) {
         Serial.printf("[对话] 说完 (说话 %dms, 静音 %dms, 共 %u 采样)\n",
                       m_speechMs, m_silenceMs, (unsigned)m_buf.size());
         m_state = UPLOADING;
