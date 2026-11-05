@@ -40,7 +40,7 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # --- 本地 Ollama（不需要联网） ---
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-OLLAMA_API_KEY  = "ollama"
+OLLAMA_API_KEY  = ""
 
 # ===========================================================================
 # MQTT
@@ -84,7 +84,7 @@ TTS_SAMPLE_RATE = 16000
 
 # 语音识别（可选）。装：pip install openai-whisper
 # 模型：tiny / base / small（越准越慢）
-ASR_MODEL = "base"
+ASR_MODEL = "small"
 ASR_SAMPLE_RATE = 16000
 
 # ===========================================================================
