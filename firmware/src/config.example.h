@@ -78,7 +78,8 @@
 
 // ---- 行为参数 ----
 #define DANGER_DISTANCE_CM    20      // 报警距离阈值
-#define OBSTACLE_AVOID_CM     30      // 避障距离
+#define OBSTACLE_AVOID_CM      6      // 6cm 内才躲（2-3 太近，15 太远）
+#define OBSTACLE_BACK_MS       150     // 后退 150ms ≈ 3-5cm 位移
 // 速度：占空比百分比
 //   实测 40% 力矩不够会卡住，60% 能转但不快
 //   80% 是当前调好的值
@@ -90,10 +91,13 @@
 // 后退补偿：实测后退动力明显不如前进
 //   （MX1508 两路导通电阻不同 + 电机碳刷两向磨损不一致）
 //   后退时把占空比再乘这个系数，100 表示不补偿
-#define MOTOR_BACK_BOOST     125      // 后退时 +25% 占空比
+#define MOTOR_BACK_BOOST     100      // 后退补偿系数（100 = 不加成）
+
+// 电机调试日志（排查方向问题时开了看）
+#define MOTOR_DEBUG       0
 #define SAMPLE_INTERVAL_MS   300      // 传感器采样周期
-#define OBSTACLE_COOLDOWN_MS  1500    // 避障动作间隔
-#define TURN_DURATION_MS      450     // 转向持续时间
+#define OBSTACLE_COOLDOWN_MS  1200    // 避障冷却
+#define TURN_DURATION_MS      450     // 小角度转开就够
 
 // ---- 音频 ----
 #define I2S_SAMPLE_RATE      16000   // ASR 用 16kHz
@@ -106,8 +110,8 @@
 //   串口发 CHAT 开对话模式，又说又停，看日志里的 rms
 //   静音时 rms 约 X，说话时约 3-5X，阈值取中间
 #define VAD_THRESHOLD        1500    // 兜底阈值（校准失败时用）
-#define VAD_NOISE_MULT        3.0f   // 触发阈值 = 底噪 × 这个倍数
-#define VAD_MIN_THRESHOLD     800    // 阈值下限（太灵敏会一直触发）
-#define VAD_SILENCE_MS        600    // 静音多久算说完
-#define VAD_MIN_SPEECH_MS     400    // 最短说话时长（太短忽略，防咳嗽）
-#define VAD_MAX_RECORD_MS    6000    // 最长录音（防说个没完）
+#define VAD_NOISE_MULT       1.6f   // 底噪倍数（3.0 太严，说话稍弱就掉）
+#define VAD_MIN_THRESHOLD     2500   // 阈值下限
+#define VAD_SILENCE_MS         700    // 静音 700ms 算说完
+#define VAD_MIN_SPEECH_MS      300    // 最短 300ms（100ms 太短被丢）
+#define VAD_MAX_RECORD_MS     8000   // 最长 8 秒
