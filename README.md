@@ -53,6 +53,7 @@
 | [docs/02-电机调试.md](docs/02-电机调试.md) | MX1508 焊接（10 个焊点）、方向校准、动力调优、调试命令 |
 | [docs/03-烧录与配置.md](docs/03-烧录与配置.md) | 烧录流程、Write timeout 处理、串口无输出、PSRAM 配置、正常启动日志 |
 | [docs/04-语音链路.md](docs/04-语音链路.md) | 麦克风 I2S、音频传输、Whisper 识别、edge-tts 合成、VAD 自动对话 |
+| [docs/05-调试实战.md](docs/05-调试实战.md) | 8 个真实 bug 的完整排查过程（JSON解析、双重编码、IPv6、削波…） |
 
 
 ## 能力
@@ -328,6 +329,91 @@ model.transcribe(path, no_speech_threshold=1.0,
 
 详见 [docs/02-电机调试.md](docs/02-电机调试.md#六最隐蔽的坑动作之间会失效)。
 
+### 18. JSON 解析漏了一个 `p++`，所有动作指令失效
+
+```cpp
+p = json.indexOf(':', p + k.length());   // p 指向冒号
+while (json[p] == ' ' || json[p] == '\t') p++;   // ❌ 没跳过冒号
+if (json[p] != '"') return false;                 // 永远返回 false
+```
+
+现象最迷惑：MQTT 消息收到了、JSON 格式对、对话能用，**只有遥控指令失效**。
+因为对话走 `speech` → PC TTS → `robot/speak`，不经过这个解析。
+
+### 19. HTTP 响应双重 JSON 编码，网页读不到状态
+
+```python
+json.dumps(已经是字符串的数据)   # ❌ 外面多一层引号
+```
+
+前端 `JSON.parse()` 拿到字符串而非对象，所有字段都是 `undefined`。
+排查方法：用原始 socket 看 body 第一个字符是 `{` 还是 `"`。
+
+### 20. SAPI 回退时没初始化 COM
+
+```
+[TTL] SAPI 不可用: (-2147221008, '尚未调用 CoInitialize。')
+```
+
+`reply()` 跑在子线程，Windows COM 要求**每线程单独初始化**。
+`_synth_sapi()` 里要 `pythoncom.CoInitialize()`。
+
+### 21. IPv6 路由不通，edge-tts 成功率只有 33%
+
+**音色时好时坏**：短句是甜甜的女声，长句是机械的女声。
+根因：DNS 返回 AAAA 记录，aiohttp 优先连 IPv6，但路由不通。
+
+修法（进程级 patch，所有网络库受益）：
+
+```python
+_orig = socket.getaddrinfo
+def _v4(host, port, family=0, type=0, proto=0, flags=0):
+    r = _orig(host, port, family, type, proto, flags)
+    v4 = [x for x in r if x[0] == socket.AF_INET]
+    return v4 if v4 else r
+socket.getaddrinfo = _v4
+```
+
+效果：成功率 33% → **100%**，耗时 1.9 秒 → **1.3 秒**。
+
+### 22. 软件音量放大导致滋滋电流声
+
+```cpp
+int32_t v = src[i] * 150 / 100;
+if (v > 32767) v = 32767;    // 大量采样被压平 → 方波 → 滋滋声
+```
+
+**不要用软件放大**。想更响改硬件：MAX98357 的 GAIN 接 GND（9dB → 15dB）。
+
+### 23. 喇叭只播第一块 1024 字节
+
+两个 bug 叠加：
+
+1. `spkReset()` 没清 `g_spkLast` → 下一轮第一块到达时 `millis() - 0 > 900` 立刻成立
+2. `publishPcm()` 上传后把 buffer 设回 **2048**，但 SPEAK 每块是 **8192** → 收不下
+
+修法：用显式 `g_spkActive` 标记 + buffer 恢复成 32768。
+
+### 24. 避障疯狂转圈
+
+避障动作耗时 830ms，采样周期只有 300ms → 动作没做完又触发一次。
+
+修法：`g_avoiding` 锁 + 避障期间跳过超声波采样。
+效果：22 秒内从十几次触发降到 **2 次**。
+
+### 25. VAD 阈值太严，说话检测不到
+
+```
+[对话] 检测到说话 (rms=16219, 阈值=15975)
+[对话] 太短忽略 (说话 100ms)
+```
+
+两个问题：
+- 阈值 = 底噪 × 3.0 太严，说话稍弱就卡边缘
+- 「太短」直接丢弃，没有宽容期（人说话有词间停顿）
+
+修法：倍数降到 1.6，加 1.5 秒宽容期。
+
 ## 项目结构
 
 ```
@@ -365,12 +451,24 @@ edge-tts            # 语音合成
 
 ## 已知限制
 
-- **对话延迟约 2-4 秒**（ASR 0.5s + AI 1.5s + TTS 1.9s + 播放）
-- **edge-tts 需要联网**，断网会自动回退到本地 SAPI（音质下降）
-- ~~退后动力偏弱~~ 已修：后退去掉 kick，避免 MX1508 过流保护
-- **无唤醒词**，需要串口发 `CHAT` 或网页点击开启对话模式
-- **摄像头未接入**（ESP32-CAM 硬件已在，固件待开发）
+- **对话延迟约 3-4 秒**（ASR 1.5s + AI 1.4s + TTS 1.3s）
+- **edge-tts 需要联网**。已在启动时强制 IPv4，成功率从 33% 提到 100%
+- **音量偏小**：MAX98357 的 GAIN 脚悬空是 9dB，接 GND 可到 15dB（约 2 倍）。
+  不要用软件放大——会削波成电流声
+- **无唤醒词**：需要串口发 `CHAT` 或网页点击开启对话模式
+- **摄像头未接入**：ESP32-CAM 硬件已在，固件待开发
+- **whisper small 模型**：准确率约 70%，`medium` 下载总失败（1.4GB）
 
+## 实测性能
+
+| 环节 | 耗时 | 说明 |
+|---|---|---|
+| VAD 录音 | 1-8 秒 | 取决于说多久 |
+| ASR (whisper small) | 1.5 秒 | base 只要 0.5 秒但准确率 50% |
+| AI (deepseek-chat) | 1.4 秒 | 台词限制 20 字内 |
+| TTS (edge 晓晓) | 1.3 秒 | IPv4 修正后从 1.9 秒降到 1.3 秒 |
+| MQTT + 播放 | 0.3 秒 | 8192 字节/块 |
+| **端到端** | **约 4.5 秒** | 不含说话和播放时长 |
 ## License
 
 MIT
