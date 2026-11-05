@@ -508,12 +508,23 @@ static void handleSerialLine(const String &line) {
     delay(2000);
     g_motor.stop();
     Serial.println("[校准] 停");
+    delay(300);   // 静默期：让 MX1508 复位，否则下一个动作会失灵
     return;
   }
   if (line == "BACK") {
     Serial.printf("[校准] 后退（L_INV=%d R_INV=%d BOOST=%d）\n",
                   MOTOR_L_INVERT, MOTOR_R_INVERT, MOTOR_BACK_BOOST);
     g_motor.backwardKick(MOTOR_SPEED_CRUISE);
+    delay(2000);
+    g_motor.stop();
+    Serial.println("[校准] 停");
+    delay(300);
+    return;
+  }
+  // BACKPLAIN：不带 kick 的纯 backward，用来排除 kick 的干扰
+  if (line == "BACKPLAIN") {
+    Serial.println("[校准] 纯后退（无 kick）");
+    g_motor.backward(MOTOR_SPEED_CRUISE);
     delay(2000);
     g_motor.stop();
     Serial.println("[校准] 停");
@@ -525,6 +536,7 @@ static void handleSerialLine(const String &line) {
     delay(1000);
     g_motor.stop();
     Serial.println("[校准] 停");
+    delay(300);
     return;
   }
   if (line == "RIGHT") {
@@ -533,6 +545,7 @@ static void handleSerialLine(const String &line) {
     delay(1000);
     g_motor.stop();
     Serial.println("[校准] 停");
+    delay(300);
     return;
   }
 
