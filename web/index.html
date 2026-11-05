@@ -100,18 +100,21 @@
   <h2>手动遥控</h2>
   <div class="row" style="margin-bottom:12px">
     <span style="font-size:12px;color:#888">速度</span>
-    <input type="range" id="speed" min="0" max="100" value="60">
-    <span class="spd" id="speedVal">60</span>
+    <input type="range" id="speed" min="0" max="100" value="80">
+    <span class="spd" id="speedVal">80</span>
+  </div>
+  <div style="font-size:11px;color:#666;text-align:center;margin-bottom:8px">
+    按住持续动，松开停
   </div>
   <div class="pad">
     <div class="btn empty"></div>
-    <div class="btn" data-act="turn_left">↰ 左转</div>
+    <div class="btn" data-hold="move_forward">↑ 前进</div>
     <div class="btn empty"></div>
-    <div class="btn" data-act="move_back">↓ 后退</div>
+    <div class="btn" data-hold="turn_left">↰ 左转</div>
     <div class="btn stop" data-act="stop">■ 停</div>
-    <div class="btn" data-act="move_forward">↑ 前进</div>
+    <div class="btn" data-hold="turn_right">右转 ↱</div>
     <div class="btn empty"></div>
-    <div class="btn" data-act="turn_right">右转 ↱</div>
+    <div class="btn" data-hold="move_back">↓ 后退</div>
     <div class="btn empty"></div>
   </div>
 </div>
@@ -151,13 +154,28 @@
     </div>
 
     <div style="font-size:12px;color:#888;margin-bottom:8px">
-      单轮测试（走 invert 修正）
+      单轮测试（走 invert 修正，数字是占空比）
     </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L+80')">左正80</button>
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L-80')">左反80</button>
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R+80')">右正80</button>
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R-80')">右反80</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L+100')">左正100</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L-100')">左反100</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R+100')">右正100</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R-100')">右反100</button>
+    </div>
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      停轮
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('L0')">停左轮</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('R0')">停右轮</button>
+      <button class="btn stop" style="padding:10px 0;font-size:12px" onclick="serial('ALL0')">全停</button>
     </div>
 
     <div style="font-size:12px;color:#888;margin-bottom:8px">
@@ -166,6 +184,14 @@
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:14px">
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('RAW+')">物理正转</button>
       <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('RAW-')">物理反转</button>
+    </div>
+
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      后退对比（排查后退方向问题）
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:14px">
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('BACK')">BACK（带 kick）</button>
+      <button class="btn" style="padding:10px 0;font-size:12px" onclick="serial('BACKPLAIN')">BACKPLAIN（纯后退）</button>
     </div>
 
     <div style="font-size:12px;color:#888;margin-bottom:8px">
@@ -200,7 +226,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let speed = 60;
+let speed = 80;
 let emotion = 'idle';
 let connected = false;
 
@@ -298,7 +324,7 @@ let lastMsg = '';
 setInterval(poll, 700);
 poll();
 
-// ---------- 遥控 ----------
+// ---------- 遥控：按住持续动 ----------
 function cmd(action, ms) {
   fetch('/api/cmd', {
     method: 'POST',
@@ -306,16 +332,37 @@ function cmd(action, ms) {
     body: JSON.stringify({action, speed, duration_ms: ms||0})
   });
 }
+
+// 点一下：走固定时长
 document.querySelectorAll('.btn[data-act]').forEach(b => {
-  const act = b.dataset.act;
-  b.addEventListener('click', () => {
-    if (act === 'stop') cmd('stop', 0);
-    else if (act === 'move_forward') cmd('move_forward', 3000);
-    else if (act === 'move_back') cmd('move_back', 2000);
-    else if (act === 'turn_left') cmd('turn_left', 800);
-    else if (act === 'turn_right') cmd('turn_right', 800);
-  });
+  b.addEventListener('click', () => cmd(b.dataset.act, 0));
 });
+
+// 按住：持续动作，松开停
+let holdTimer = null;
+document.querySelectorAll('.btn[data-hold]').forEach(b => {
+  const act = b.dataset.hold;
+
+  const start = (e) => {
+    e.preventDefault();
+    cmd(act, 30000);           // 给一个长时长，靠松手停
+    // 每 2 秒续一次，防止固件端时长到期
+    holdTimer = setInterval(() => cmd(act, 30000), 2000);
+  };
+
+  const stop = (e) => {
+    if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+    cmd('stop', 0);
+  };
+
+  b.addEventListener('mousedown', start);
+  b.addEventListener('touchstart', start, {passive: false});
+  b.addEventListener('mouseup', stop);
+  b.addEventListener('mouseleave', stop);
+  b.addEventListener('touchend', stop);
+  b.addEventListener('touchcancel', stop);
+});
+
 $('speed').addEventListener('input', e => {
   speed = e.target.value;
   $('speedVal').textContent = speed;
