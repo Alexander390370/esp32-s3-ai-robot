@@ -82,8 +82,14 @@ class Motor {
     // 必须让每侧各自走自己的 invert 逻辑（driveSide 内部会处理），
     // 不能在这里统一改成 +1 —— 否则右轮会被 R_INVERT 再翻一次，
     // 变成一侧往前一侧往后 → 原地打转。
-    //
-    // MOTOR_BACK_BOOST：实测后退动力不如前进，这里给额外增益补偿。
+#if MOTOR_DEBUG
+    int s = speed * MOTOR_BACK_BOOST / 100;
+    if (s > 100) s = 100;
+    Serial.printf("[后退] speed=%d boost=%d -> %d%% | L写%s R写%s\n",
+                  speed, MOTOR_BACK_BOOST, s,
+                  (MOTOR_L_INVERT ? "IN1" : "IN2"),
+                  (MOTOR_R_INVERT ? "IN1" : "IN2"));
+#endif
     driveSide(0, -1, speed, MOTOR_BACK_BOOST);
     driveSide(1, -1, speed, MOTOR_BACK_BOOST);
   }
@@ -108,10 +114,30 @@ class Motor {
   }
 
   void stop() {
+    // 用 analogWrite(0) 而不是 digitalWrite(LOW)。
+    // 因为之前用 analogWrite 设过 PWM，硬切 LOW 有可能残留占空比寄存器，
+    // 导致下一次换个方向时 MX1508 收到冲突电平（表现为不动或抖动）。
+    analogWrite(PIN_MOTOR_L1, 0);
+    analogWrite(PIN_MOTOR_L2, 0);
+    analogWrite(PIN_MOTOR_R1, 0);
+    analogWrite(PIN_MOTOR_R2, 0);
     digitalWrite(PIN_MOTOR_L1, LOW);
     digitalWrite(PIN_MOTOR_L2, LOW);
     digitalWrite(PIN_MOTOR_R1, LOW);
     digitalWrite(PIN_MOTOR_R2, LOW);
+  }
+
+  // ---------------- 诊断 ----------------
+  // setWheel 计算出"应该"写什么之后打印出来，方便对比物理方向。
+  // 注意不能用 digitalRead 读——analogWrite 是 PWM，读回来只有 0/1。
+  static void dumpIntent(const char *tag, int side, int dir, int speed,
+                         int invert, int pwmApplied) {
+    // 算出最终会写哪个引脚
+    int d = invert ? -dir : dir;
+    const char *which = (d > 0) ? "IN1(HIGH)" : (d < 0 ? "IN2(HIGH)" : "两个都LOW");
+    Serial.printf("[力矩] %s side=%s dir=%+d speed=%d%% inv=%d -> %s @%d/255\n",
+                  tag, side == 0 ? "左" : "右", dir, speed, invert,
+                  which, pwmApplied);
   }
 
   // ---------------- 带满力矩起步 ----------------
@@ -129,10 +155,15 @@ class Motor {
   }
 
   void backwardKick(int speed, int kickMs = 250) {
-    if (speed <= 0) { stop(); return; }
-    driveSide(0, -1, 100, MOTOR_BACK_BOOST);
-    driveSide(1, -1, 100, MOTOR_BACK_BOOST);
-    delay(kickMs);
+    // ⚠️ 实测发现：后退不能加 kick。
+    //
+    // 原因：MOTOR_BACK_BOOST 已经让后退的实际占空比顶到 100%，
+    // kick 再用 100% 冲一次，等于连续满功率启动两次。
+    // MX1508 在这种情况会触发过流保护，表现为「吱吱响但轮子不动」，
+    // 反而不如直接给 100% 一次到位。
+    //
+    // 所以后退直接走 backward()，不做 kick。
+    (void)kickMs;
     backward(speed);
   }
 
