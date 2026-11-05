@@ -84,22 +84,65 @@ class AudioIO {
   }
 
   // ---------- 播放 ----------
+  //
+  // 软件音量放大：MAX98357 的增益由 GAIN 引脚决定（悬空 9dB / 接 GND 15dB），
+  // 硬件不方便改的情况下，可以在写 I2S 前把 PCM 数字放大。
+  // 放大后可能削波，所以带限幅。
   void play(const uint8_t *data, size_t bytes) {
     if (!m_spkOk || bytes == 0) return;
 
+    int vol = m_volume;
     size_t written = 0;
     uint32_t deadline = millis() + 15000;
+
     while (written < bytes && millis() < deadline) {
       size_t n = 0;
-      esp_err_t err = i2s_write(I2S_NUM_1, data + written, bytes - written, &n,
-                                500 / portTICK_PERIOD_MS);
-      if (err != ESP_OK || n == 0) {
-        delay(5);
-        continue;
+
+      if (vol <= 100) {
+        // 不放大，直接写
+        esp_err_t err = i2s_write(I2S_NUM_1, data + written,
+                                  bytes - written, &n,
+                                  500 / portTICK_PERIOD_MS);
+        if (err != ESP_OK || n == 0) {
+          delay(5);
+          continue;
+        }
+      } else {
+        // 放大：每次处理 512 字节，带限幅防削波
+        size_t chunk = bytes - written;
+        if (chunk > 512) chunk = 512;
+        chunk &= ~1u;                 // 保证偶数（16 位采样）
+        if (chunk == 0) break;
+
+        int16_t tmp[256];
+        size_t samples = chunk / 2;
+        const int16_t *src = (const int16_t *)(data + written);
+        for (size_t i = 0; i < samples; i++) {
+          int32_t v = (int32_t)src[i] * vol / 100;
+          if (v > 32767) v = 32767;
+          if (v < -32768) v = -32768;
+          tmp[i] = (int16_t)v;
+        }
+        esp_err_t err = i2s_write(I2S_NUM_1, tmp, samples * 2, &n,
+                                  500 / portTICK_PERIOD_MS);
+        if (err != ESP_OK || n == 0) {
+          delay(5);
+          continue;
+        }
       }
       written += n;
     }
   }
+
+  // 设置软件音量（100 = 原始，150 = 放大 1.5 倍）
+  void setVolume(int v) {
+    if (v < 100) v = 100;
+    if (v > 200) v = 200;
+    m_volume = v;
+    Serial.printf("[Audio] 软件音量 %d%%\n", v);
+  }
+
+  int volume() const { return m_volume; }
 
   void stopPlay() {
     if (m_spkOk) i2s_zero_dma_buffer(I2S_NUM_1);
@@ -129,6 +172,7 @@ class AudioIO {
   }
 
  private:
+  int m_volume = 100;    // 软件音量（100 = 不放大；>100 会削波成电流声，慎用）
   bool m_micOk = false;
   bool m_spkOk = false;
 
