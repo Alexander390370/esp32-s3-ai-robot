@@ -52,6 +52,7 @@ static int    g_dist = 999;
 static int    g_pir = 0;
 static int    g_light = 0;
 static uint32_t g_lastAvoid = 0;
+static bool     g_avoiding = false;   // 避障动作进行中（锁）
 static uint32_t g_lastState = 0;
 static uint32_t g_actionUntil = 0;      // 当前动作结束时间
 static String  g_currentAction = "idle";
@@ -83,7 +84,9 @@ static bool jsonGetString(const String &json, const char *key, String &out) {
   if (p < 0) return false;
   p = json.indexOf(':', p + k.length());
   if (p < 0) return false;
-  while (p < (int)json.length() && (json[p] == ' ' || json[p] == '\t')) p++;
+  p++;                                     // ⚠️ 跳过冒号本身（之前漏了）
+  while (p < (int)json.length() &&
+         (json[p] == ' ' || json[p] == '\t')) p++;
   if (p >= (int)json.length() || json[p] != '"') return false;
   p++;
   out = "";
@@ -101,7 +104,9 @@ static bool jsonGetInt(const String &json, const char *key, int &out) {
   if (p < 0) return false;
   p = json.indexOf(':', p + k.length());
   if (p < 0) return false;
-  while (p < (int)json.length() && (json[p] == ' ' || json[p] == '\t')) p++;
+  p++;                                     // ⚠️ 同样跳过冒号
+  while (p < (int)json.length() &&
+         (json[p] == ' ' || json[p] == '\t')) p++;
   out = 0;
   bool neg = false;
   if (p < (int)json.length() && json[p] == '-') { neg = true; p++; }
@@ -148,7 +153,8 @@ static void doAction(const String &action, int speed, int durationMs) {
 static uint8_t *g_spkBuf = nullptr;
 static size_t   g_spkLen = 0;
 static size_t   g_spkCap = 0;
-static uint32_t g_spkLast = 0;
+static uint32_t g_spkLast = 0;      // 最后一块到达时刻
+static bool     g_spkActive = false; // 是否处于"正在接收"状态
 
 static void spkReset() {
   if (g_spkBuf) {
@@ -157,6 +163,8 @@ static void spkReset() {
   }
   g_spkLen = 0;
   g_spkCap = 0;
+  g_spkLast = 0;
+  g_spkActive = false;
 }
 
 static bool spkAppend(const uint8_t *data, size_t len) {
@@ -182,6 +190,7 @@ static bool spkAppend(const uint8_t *data, size_t len) {
   memcpy(g_spkBuf + g_spkLen, data, len);
   g_spkLen += len;
   g_spkLast = millis();
+  g_spkActive = true;               // 标记进入接收状态
   return true;
 }
 // ===========================================================================
@@ -335,9 +344,13 @@ static bool publishPcm(const std::vector<int16_t> &pcm) {
         break;
       }
       offset += n;
+      // 让 MQTT 保持心跳，别长时间卡住
+      g_mqtt.loop();
       delay(1);
     }
-    g_mqtt.setBufferSize(2048);
+    // ⚠️ 恢复成 32768，不是 2048！
+    //    PC 回传的 SPEAK 每块 8192 字节，buffer 太小会收不下 → 喇叭没声。
+    g_mqtt.setBufferSize(32768);
   } else {
     ok = false;
   }
@@ -392,31 +405,60 @@ static void recordAndUpload() {
 // ===========================================================================
 // 自动避障
 // ===========================================================================
+// ===========================================================================
+// 自动避障
+// ===========================================================================
+// 核心原则：避障动作是「原子」的，一旦开始就锁住，做完才允许下一次判断。
+//
+// 之前疯狂转圈的原因：
+//   采样周期 300ms，但避障动作要 680ms（后退150 + 转450 + 静默80）。
+//   动作还没做完，下一轮判断又来了，又触发一次 → 无限叠加。
+//
+// 现在用 g_avoiding 标志锁住整个动作期间，别的逻辑不能打断。
 static void autoAvoid() {
   uint32_t now = millis();
+
+  // 正在避障中，什么都不做（动作在别处阻塞执行完了才解锁）
+  if (g_avoiding) return;
 
   // 距离够远就巡航
   if (g_dist > OBSTACLE_AVOID_CM || g_dist == 999) {
     if (g_currentAction != "move_forward") {
-      g_motor.forwardKick(MOTOR_SPEED_CRUISE);
+      g_motor.forward(MOTOR_SPEED_CRUISE);
       g_currentAction = "move_forward";
     }
     return;
   }
 
-  // 有障碍，但要避开避障冷却期
+  // 冷却期内不重复触发
   if (now - g_lastAvoid < OBSTACLE_COOLDOWN_MS) return;
   g_lastAvoid = now;
 
-  Serial.printf("[避障] 前方 %dcm，转向\n", g_dist);
+  Serial.printf("[避障] 前方 %dcm，让开\n", g_dist);
   g_face.setEmotion(EMO_SURPRISED);
 
-  // 先退一点再转
-  g_motor.backwardKick(MOTOR_SPEED_SLOW);
-  delay(300);
-  g_motor.turnKick(MOTOR_SPEED_TURN, (random(0, 2) ? 1 : -1));
+  // ---- 锁住，执行完整避障动作 ----
+  g_avoiding = true;
+  g_currentAction = "avoiding";
+  g_motor.stop();          // 先停一下，稳定状态
+  delay(50);
+
+  // 1. 后退一点（150ms ≈ 3-5cm）
+  g_motor.backward(MOTOR_SPEED_SLOW);
+  delay(OBSTACLE_BACK_MS);
+  g_motor.stop();
+  delay(80);
+
+  // 2. 小角度转开
+  int turnDir = (random(0, 2) ? 1 : -1);
+  g_motor.turn(MOTOR_SPEED_TURN, turnDir);
   delay(TURN_DURATION_MS);
-  g_motor.forwardKick(MOTOR_SPEED_CRUISE);
+  g_motor.stop();
+  delay(80);
+
+  // 3. 解锁，下一轮循环重新判断
+  g_avoiding = false;
+  g_currentAction = "idle";
 }
 
 // ===========================================================================
@@ -449,6 +491,15 @@ static void handleSerialLine(const String &line) {
   if (line == "RMS") {
     Serial.printf("[调试] 阈值 %.0f，底噪 %.0f\n",
                   g_chat.threshold(), g_chat.noiseFloor());
+    return;
+  }
+  // VOL / VOL150 —— 调软件音量（100=原始，200=放大2倍）
+  if (line.startsWith("VOL")) {
+    if (line.length() > 3) {
+      g_audio.setVolume(line.substring(3).toInt());
+    } else {
+      Serial.printf("[音频] 当前音量 %d%%\n", g_audio.volume());
+    }
     return;
   }
   if (line == "AUTO") {
@@ -700,8 +751,10 @@ void loop() {
   }
 
   // ---- 传感器采样 ----
+  // 避障动作执行期间不采样：超声波 measure() 要 3×60ms，
+  // 会拖慢避障动作，而且中途测到的距离是乱的。
   static uint32_t lastSample = 0;
-  if (millis() - lastSample >= SAMPLE_INTERVAL_MS) {
+  if (!g_avoiding && millis() - lastSample >= SAMPLE_INTERVAL_MS) {
     lastSample = millis();
     g_dist  = g_ultra.measure();
     g_pir   = digitalRead(PIN_PIR);
@@ -729,8 +782,14 @@ void loop() {
     }
   }
 
-  // ---- 播放：攒够后（600ms 没新块）一次性播 ----
-  if (g_spkLen > 0 && millis() - g_spkLast > 600) {
+  // ---- 播放：收齐后一次性播 ----
+  //
+  // 用 g_spkActive 标记"正在接收"，比用时间戳判断可靠：
+  //   之前用 millis() - g_spkLast > 900，但 g_spkLast 清零后
+  //   millis() - 0 立刻大于 900，导致只播第一块。
+  //
+  // 现在：必须处于"接收完"状态（900ms 没有新块）才播放。
+  if (g_spkActive && g_spkLen > 0 && millis() - g_spkLast > 900) {
     Serial.printf("[SPEAK] 开始播放 %u 字节\n", (unsigned)g_spkLen);
     Serial.flush();
     g_audio.play(g_spkBuf, g_spkLen);
